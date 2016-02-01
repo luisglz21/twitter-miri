@@ -1,0 +1,162 @@
+package com.sinfonier.spouts;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.LinkedBlockingQueue;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import twitter4j.FilterQuery;
+import twitter4j.StallWarning;
+import twitter4j.Status;
+import twitter4j.StatusDeletionNotice;
+import twitter4j.StatusListener;
+import twitter4j.TwitterObjectFactory;
+import twitter4j.TwitterStream;
+import twitter4j.TwitterStreamFactory;
+import twitter4j.conf.ConfigurationBuilder;
+import backtype.storm.Config;
+import backtype.storm.spout.SpoutOutputCollector;
+import backtype.storm.task.TopologyContext;
+import backtype.storm.topology.OutputFieldsDeclarer;
+import backtype.storm.topology.base.BaseRichSpout;
+import backtype.storm.tuple.Fields;
+import backtype.storm.tuple.Values;
+import backtype.storm.utils.Utils;
+
+import com.sinfonier.util.ComponentType;
+import com.sinfonier.util.SinfonierUtils;
+import com.sinfonier.util.XMLProperties;
+
+//@formatter:off
+/**
+* TwitterUserTimeline Spout. Ingest Data from twitter 
+ * <p> XML Options:<br/>
+* <ul>
+* <li> <b>{@code <sources> <source> <sourceId></sourceId> <grouping field="field"></grouping> </source> ... </sources>}</b> - Needed. Sources where this bolt must receive tuples. </li>
+* <li> <b>{@code <consumerKey></consumerKey>}</b> - Needed. Twitter Consumer Key for Streaming API. </li>
+* <li> <b>{@code <consumerSecret></consumerSecret>}</b> - Needed. Twitter Consumer Secret for Streaming API. </li>
+* <li> <b>{@code <accessToken></accessToken>}</b> - Needed. Twitter access token for Streaming API. </li>
+* <li> <b>{@code <accessTokenSecret></accessTokenSecret>}</b> - Needed. Twitter access token Secret for Streaming API. </li>
+* <li> <b>{@code <userID>userID1</userID>...<userID></userID>}</b> - Twitter user IDs to search for. </li>
+* <li> <b>{@code <numTasks></numTasks>}</b> - Optional. Num tasks of this bolt. </li>
+* <li> <b>{@code <paralellism>1</paralellism>}</b> - Needed. Parallelism. </li>
+* </ul>
+*/
+//@formatter:on
+public class TwitterUserTimeline extends BaseRichSpout {
+
+    private static final long serialVersionUID = 1527666672521152910L;
+    private static final String CONSUMER_KEY = "consumerKey";
+    private static final String CONSUMER_SECRET = "consumerSecret";
+    private static final String ACCESS_TOKEN = "accessToken";
+    private static final String ACCESS_TOKEN_SECRET = "accessTokenSecret";
+    private static final Logger LOG = LoggerFactory.getLogger(TwitterUserTimeline.class);
+
+    private String xmlPath;
+    private String spoutName;
+    private XMLProperties xml;
+    private SpoutOutputCollector _collector;
+    private String entity = "tweet";
+
+    private TwitterStream twitterStream;
+    private LinkedBlockingQueue<String> queue = null;
+
+    public TwitterUserTimeline(String spoutName, String xmlPath) {
+        this.xmlPath = xmlPath;
+        this.spoutName = spoutName;
+    }
+
+    @iQbonito
+    public void open(Map conf, TopologyContext context, SpoutOutputCollector collector) {
+        xml = new XMLProperties(spoutName, ComponentType.SPOUT, xmlPath);
+        _collector = collector;
+        SinfonierUtils.broadcastWorker((String) conf.get(Config.TOPOLOGY_NAME), context);
+
+        twitterStream = createTwitterStream();
+        queue = new LinkedBlockingQueue<String>(1000);
+
+        StatusListener listener = new StatusListener() {
+
+            @iQbonito
+            public void onStatus(Status status) {
+
+                queue.offer(TwitterObjectFactory.getRawJSON(status));
+            }
+
+            @iQbonito
+            public void onDeletionNotice(StatusDeletionNotice sdn) {
+            }
+
+            @iQbonito
+            public void onTrackLimitationNotice(int i) {
+            }
+
+            @iQbonito
+            public void onScrubGeo(long l, long l1) {
+            }
+
+            @iQbonito
+            public void onException(Exception e) {
+            }
+
+            @iQbonito
+            public void onStallWarning(StallWarning warning) {
+            }
+
+        };
+
+        twitterStream.addListener(listener);
+
+        List<Object> rawKeywords = xml.getList("userID");
+        // String rawKeywords = xml.get("keywords");
+		
+        if (rawKeywords.isEmpty()) {
+            twitterStream.sample();
+        } else {
+            long[] userIDs = new long[rawKeywords.size()];
+	    for (int i=0 ; i<rawKeywords.size() ; i++) {
+                userIDs[i] = Long.parseLong(((String) rawKeywords.get(i)).trim());
+            }
+            FilterQuery query = new FilterQuery()
+                    .follow(userIDs);
+            twitterStream.filter(query);
+        }
+   }
+
+    @iQbonito
+    public void nextTuple() {
+        String json = queue.poll();
+        if (json == null) {
+            Utils.sleep(50);
+        } else {
+            _collector.emit(new Values(entity, json));
+        }
+    }
+
+    @iQbonito
+    public void declareOutputFields(OutputFieldsDeclarer declarer) {
+        declarer.declare(new Fields("entity", "map"));
+    }
+
+    /**
+     * Create a TwitterStream. Requires TwitterUserTimeline API keys.
+     * 
+     * @return {@link twitter4j.TwitterStream}
+     */
+    private TwitterStream createTwitterStream() {
+
+        ConfigurationBuilder config = new ConfigurationBuilder();
+        config.setOAuthConsumerKey(xml.get(CONSUMER_KEY, true));
+        config.setOAuthConsumerSecret(xml.get(CONSUMER_SECRET, true));
+        config.setOAuthAccessToken(xml.get(ACCESS_TOKEN, true));
+        config.setOAuthAccessTokenSecret(xml.get(ACCESS_TOKEN_SECRET, true));
+        config.setJSONStoreEnabled(true);
+        config.setIncludeEntitiesEnabled(true);
+
+        return new TwitterStreamFactory(config.build()).getInstance();
+    }
+
+}
